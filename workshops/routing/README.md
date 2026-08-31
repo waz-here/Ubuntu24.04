@@ -175,7 +175,7 @@ The installer:
 Clone or copy this routing directory to a fresh Ubuntu 24.04 VM, then run:
 
 ```bash
-cd ~/routing-ubuntu24
+cd ~/Ubuntu24.04/workshops/routing/
 chmod +x setup_routing_workshop_ubuntu24.sh
 ```
 
