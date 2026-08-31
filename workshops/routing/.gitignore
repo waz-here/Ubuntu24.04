@@ -1,0 +1,14 @@
+# Cisco IOS images
+*.image
+*.bin
+
+# Generated workshop credentials and private keys
+guacamole-credentials.txt
+*.key
+*.pem
+
+# Runtime state
+*.pid
+*.log
+c7200_*
+c7200-*.ghost
