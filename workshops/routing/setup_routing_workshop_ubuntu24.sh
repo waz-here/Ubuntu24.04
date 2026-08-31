@@ -651,7 +651,7 @@ install_guacamole() {
 
         for i in $(seq 1 14); do
             port=$((2000 + i))
-            printf '    <connection name="Router r%d">\n' "$i"
+            printf '    <connection name="Router r%02d">\n' "$i"
             echo '      <protocol>telnet</protocol>'
             echo '      <param name="hostname">127.0.0.1</param>'
             printf '      <param name="port">%d</param>\n' "$port"
