@@ -74,6 +74,8 @@ INSTRUCTOR_JUMPHOST_IP="192.168.30.222"
 INSTRUCTOR_SSH_WAN_PORT="2222"
 INSTRUCTOR_CONTAINER="routing-instructor"
 INSTRUCTOR_USER="instructor"
+INSTRUCTOR_AUTHORIZED_KEYS_FILE=""
+PROMPT_INSTRUCTOR_PASSWORD=0
 
 ########################################
 # Logging and error handling
@@ -114,6 +116,14 @@ Options:
                           Internal host: 192.168.30.254/24
                           Jump host:     192.168.30.222/24
                           WAN TCP/2222 -> jump host TCP/22
+  --instructor-authorized-keys FILE
+                          Install one or more instructor SSH public keys from
+                          FILE into the jump host. The VM administrator's SSH
+                          keys are never reused for instructor access.
+  --instructor-password
+                          Prompt securely for an instructor password during
+                          installation. The password is not placed on the
+                          command line or stored in shell history.
   --no-upgrade            Skip apt-get dist-upgrade.
   --workshop-user USER    User who owns ~/virtual_labs.
   -h, --help              Show this help.
@@ -146,6 +156,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --enable-instructor-jumphost)
             ENABLE_INSTRUCTOR_JUMPHOST=1
+            shift
+            ;;
+        --instructor-authorized-keys)
+            [[ $# -ge 2 ]] || die "--instructor-authorized-keys requires a file path"
+            INSTRUCTOR_AUTHORIZED_KEYS_FILE="$2"
+            shift 2
+            ;;
+        --instructor-password)
+            PROMPT_INSTRUCTOR_PASSWORD=1
             shift
             ;;
         --no-upgrade)
@@ -1038,20 +1057,72 @@ EOF
     lxc-attach -n "$INSTRUCTOR_CONTAINER" -- bash -c \
         "id -u ${INSTRUCTOR_USER} >/dev/null 2>&1 || useradd -m -s /bin/bash ${INSTRUCTOR_USER}"
 
-    # Reuse the Azure/VM administrator's existing authorised SSH keys.
-    local host_authorized_keys="${WORKSHOP_HOME}/.ssh/authorized_keys"
-    [[ -s "$host_authorized_keys" ]] || \
-        die "No SSH authorised_keys found at ${host_authorized_keys}. Add an SSH public key before enabling the instructor jump host."
+    # Instructor access is deliberately separate from VM administration.
+    # Never reuse the workshop/Azure administrator's authorised_keys.
+    #
+    # Password authentication is the default when no instructor public-key
+    # file is supplied. This is useful when the people creating the Azure VM
+    # are not the instructors who will later operate the workshop.
+    #
+    # --instructor-password explicitly selects the same password-first mode.
+    # --instructor-authorized-keys FILE enables public-key authentication.
+    # Both methods may be enabled together.
+    local instructor_password=""
+    local instructor_password_confirm=""
+    local instructor_password_enabled=0
+    local instructor_keys_enabled=0
+    local instructor_authorized_keys=""
+
+    if [[ -n "$INSTRUCTOR_AUTHORIZED_KEYS_FILE" ]]; then
+        [[ -s "$INSTRUCTOR_AUTHORIZED_KEYS_FILE" ]] || \
+            die "Instructor authorised-keys file not found or empty: ${INSTRUCTOR_AUTHORIZED_KEYS_FILE}"
+        instructor_authorized_keys="$INSTRUCTOR_AUTHORIZED_KEYS_FILE"
+        instructor_keys_enabled=1
+        log "Using dedicated instructor SSH public keys from ${INSTRUCTOR_AUTHORIZED_KEYS_FILE}."
+    fi
+
+    if [[ "$PROMPT_INSTRUCTOR_PASSWORD" -eq 1 || "$instructor_keys_enabled" -eq 0 ]]; then
+        instructor_password_enabled=1
+        log "Instructor password authentication will be enabled."
+
+        while true; do
+            read -r -s -p "Instructor SSH password: " instructor_password
+            printf '\n'
+            read -r -s -p "Confirm instructor SSH password: " instructor_password_confirm
+            printf '\n'
+
+            if [[ "$instructor_password" != "$instructor_password_confirm" ]]; then
+                echo "Passwords do not match. Try again." >&2
+                continue
+            fi
+
+            if [[ ${#instructor_password} -lt 12 ]]; then
+                echo "Instructor password must contain at least 12 characters. Try again." >&2
+                continue
+            fi
+            break
+        done
+    fi
 
     local rootfs="/var/lib/lxc/${INSTRUCTOR_CONTAINER}/rootfs"
-    install -d -m 0700 -o 0 -g 0 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
-    cp "$host_authorized_keys" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
-    chmod 0600 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
 
-    local uid gid
-    uid="$(chroot "$rootfs" id -u "$INSTRUCTOR_USER")"
-    gid="$(chroot "$rootfs" id -g "$INSTRUCTOR_USER")"
-    chown -R "$uid:$gid" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
+    if [[ "$instructor_keys_enabled" -eq 1 ]]; then
+        install -d -m 0700 -o 0 -g 0 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
+        cp "$instructor_authorized_keys" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
+        chmod 0600 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
+
+        local uid gid
+        uid="$(chroot "$rootfs" id -u "$INSTRUCTOR_USER")"
+        gid="$(chroot "$rootfs" id -g "$INSTRUCTOR_USER")"
+        chown -R "$uid:$gid" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
+    fi
+
+    if [[ "$instructor_password_enabled" -eq 1 ]]; then
+        printf '%s:%s\n' "$INSTRUCTOR_USER" "$instructor_password" | \
+            lxc-attach -n "$INSTRUCTOR_CONTAINER" -- chpasswd
+    else
+        lxc-attach -n "$INSTRUCTOR_CONTAINER" -- passwd -l "$INSTRUCTOR_USER" >>"$LOG_FILE" 2>&1 || true
+    fi
 
     # Prefer the repository copy of the instructor menu if available.
     local script_dir menu_source
@@ -1105,11 +1176,16 @@ EOF
     fi
     chmod 0755 "${rootfs}/usr/local/bin/router-console-menu"
 
+    local password_auth="no"
+    local pubkey_auth="no"
+    [[ "$instructor_password_enabled" -eq 1 ]] && password_auth="yes"
+    [[ "$instructor_keys_enabled" -eq 1 ]] && pubkey_auth="yes"
+
     cat >"${rootfs}/etc/ssh/sshd_config.d/90-routing-workshop-instructor.conf" <<EOF
-PasswordAuthentication no
+PasswordAuthentication ${password_auth}
 KbdInteractiveAuthentication no
 PermitRootLogin no
-PubkeyAuthentication yes
+PubkeyAuthentication ${pubkey_auth}
 AllowUsers ${INSTRUCTOR_USER}
 
 Match User ${INSTRUCTOR_USER}
@@ -1121,6 +1197,7 @@ EOF
 
     lxc-attach -n "$INSTRUCTOR_CONTAINER" -- systemctl enable ssh >>"$LOG_FILE" 2>&1
     lxc-attach -n "$INSTRUCTOR_CONTAINER" -- systemctl restart ssh >>"$LOG_FILE" 2>&1
+    unset instructor_password instructor_password_confirm
 
     install_aux_proxy_services
 
@@ -1305,7 +1382,14 @@ display_summary() {
             echo "  ssh -p ${INSTRUCTOR_SSH_WAN_PORT} ${INSTRUCTOR_USER}@<server-ip>"
         fi
         echo
-        echo "The jump host reuses ${WORKSHOP_USER}'s SSH authorised keys."
+        if [[ "$PROMPT_INSTRUCTOR_PASSWORD" -eq 1 || -z "$INSTRUCTOR_AUTHORIZED_KEYS_FILE" ]]; then
+            echo "Instructor authentication: password enabled"
+        fi
+        if [[ -n "$INSTRUCTOR_AUTHORIZED_KEYS_FILE" ]]; then
+            echo "Instructor authentication: public key enabled"
+        fi
+        echo "VM administrator SSH keys are not reused for instructor access."
+        echo "Public keys can be added later with jumphost/add_instructor_ssh_key.sh."
         echo "Host administration remains on normal SSH TCP/22."
         echo "In Azure, allow TCP/${INSTRUCTOR_SSH_WAN_PORT} in the VM's NSG for instructor source addresses."
         echo

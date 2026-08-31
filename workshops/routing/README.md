@@ -113,6 +113,21 @@ For Azure deployments, allow TCP/2222 in the Network Security Group only from
 trusted instructor source addresses. Keep TCP/22 available for VM
 administration. The `192.168.30.0/24` network remains private behind the VM.
 
+
+For separate instructor identities, prepare an `authorized_keys`-style file containing
+the instructors' SSH public keys and supply it during installation:
+
+```bash
+sudo ./setup_routing_workshop_ubuntu24.sh \
+    --enable-instructor-jumphost \
+    --enable-firewall \
+    --instructor-authorized-keys /path/to/instructors_authorized_keys
+```
+
+Each line in that file can be a different instructor's SSH public key. If no file is
+supplied, the installer generates a dedicated workshop-only instructor key pair. It
+never copies the Azure VM administrator's SSH keys into the jump host.
+
 ## Actions performed
 
 The installer:
@@ -162,9 +177,6 @@ Other useful options:
 
 If the installer adds your account to the `docker` group, log out and back in
 before using Docker without `sudo`.
-
-## Topology diagram
-![topology diagram](images/topology_diagram.png)
 
 ## Starting the lab
 
@@ -400,3 +412,25 @@ https://github.com/waz-here/Ubuntu18.04/tree/master/workshops/routing
 
 Review the licensing and attribution requirements of the original workshop
 materials before redistributing modified versions.
+
+
+### Instructor authentication
+
+The instructor jump host can initially use a shared workshop password:
+
+```bash
+sudo ./setup_routing_workshop_ubuntu24.sh \
+    --enable-instructor-jumphost \
+    --enable-firewall \
+    --instructor-password
+```
+
+The installer prompts securely for the password. Instructor public keys can be added
+later using:
+
+```bash
+sudo ./jumphost/add_instructor_ssh_key.sh instructor.pub
+```
+
+Add `--disable-password` to that helper when the instructors are ready to use
+public-key-only SSH authentication.
