@@ -128,6 +128,29 @@ Each line in that file can be a different instructor's SSH public key. If no fil
 supplied, the installer generates a dedicated workshop-only instructor key pair. It
 never copies the Azure VM administrator's SSH keys into the jump host.
 
+
+### Instructor authentication
+
+The instructor jump host can initially use a shared workshop password:
+
+```bash
+sudo ./setup_routing_workshop_ubuntu24.sh \
+    --enable-instructor-jumphost \
+    --enable-firewall \
+    --instructor-password
+```
+
+The installer prompts securely for the password. Instructor public keys can be added
+later using:
+
+```bash
+sudo ./jumphost/add_instructor_ssh_key.sh instructor.pub
+```
+
+Add `--disable-password` to that helper when the instructors are ready to use
+public-key-only SSH authentication.
+
+
 ## Actions performed
 
 The installer:
@@ -416,24 +439,3 @@ https://github.com/waz-here/Ubuntu18.04/tree/master/workshops/routing
 Review the licensing and attribution requirements of the original workshop
 materials before redistributing modified versions.
 
-
-### Instructor authentication
-
-The instructor jump host can initially use a shared workshop password:
-
-```bash
-sudo ./setup_routing_workshop_ubuntu24.sh \
-    --enable-instructor-jumphost \
-    --enable-firewall \
-    --instructor-password
-```
-
-The installer prompts securely for the password. Instructor public keys can be added
-later using:
-
-```bash
-sudo ./jumphost/add_instructor_ssh_key.sh instructor.pub
-```
-
-Add `--disable-password` to that helper when the instructors are ready to use
-public-key-only SSH authentication.
