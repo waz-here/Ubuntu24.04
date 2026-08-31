@@ -29,7 +29,7 @@ Options:
 The new password is requested interactively so that it is not stored in
 your shell command history.
 
-The password must contain at least 12 characters.
+The password must contain at least 8 characters.
 EOF
 }
 
@@ -85,7 +85,7 @@ while true; do
         continue
     }
 
-    [[ ${#NEW_PASSWORD} -ge 12 ]] || {
+    [[ ${#NEW_PASSWORD} -ge 8 ]] || {
         printf 'Password must contain at least 12 characters. Try again.\n\n' >&2
         continue
     }
