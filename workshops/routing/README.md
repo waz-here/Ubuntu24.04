@@ -58,7 +58,7 @@ https://www.cisco.com/c/en/us/support/routers/7200-series-routers/tsd-products-s
 ## Repository layout
 
 ```text
-routing/
+routing-ubuntu24/
 ├── README.md
 ├── setup_routing_workshop_ubuntu24.sh
 ├── dynamips/
@@ -83,6 +83,35 @@ The installer copies the `dynamips/` directory into:
 If the repository folder is not available beside the installer, the installer
 can fall back to downloading `topology.net` from the existing workshop
 repository.
+
+
+## Optional instructor jump host
+
+The installer can create a locked-down LXC jump host for instructor access to
+the router AUX consoles:
+
+```bash
+sudo ./setup_routing_workshop_ubuntu24.sh --enable-instructor-jumphost
+```
+
+The internal management network is `192.168.30.0/24`. The Ubuntu workshop host
+uses `192.168.30.254` and the instructor LXC uses `192.168.30.222`.
+
+The external port convention is:
+
+| Port | Purpose |
+| ---: | --- |
+| TCP 22 | Ubuntu VM administration |
+| TCP 443 | Student Guacamole access |
+| TCP 2222 | Instructor SSH, forwarded to the LXC jump host |
+
+After logging in through TCP/2222, the instructor is presented with a
+router-selection menu. Router r01 maps to AUX TCP/3001 through Router r14 on
+TCP/3014. The AUX ports are not exposed on the WAN.
+
+For Azure deployments, allow TCP/2222 in the Network Security Group only from
+trusted instructor source addresses. Keep TCP/22 available for VM
+administration. The `192.168.30.0/24` network remains private behind the VM.
 
 ## Actions performed
 
@@ -133,9 +162,6 @@ Other useful options:
 
 If the installer adds your account to the `docker` group, log out and back in
 before using Docker without `sudo`.
-
-## Topology diagram
-![topology diagram](images/topology_diagram.png)
 
 ## Starting the lab
 
