@@ -175,6 +175,9 @@ Other useful options:
 --workshop-user USER
 ```
 
+## Topology diagram
+![topology diagram](images/topology_diagram.png)
+
 If the installer adds your account to the `docker` group, log out and back in
 before using Docker without `sudo`.
 
