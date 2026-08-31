@@ -163,6 +163,9 @@ Other useful options:
 If the installer adds your account to the `docker` group, log out and back in
 before using Docker without `sudo`.
 
+## Topology diagram
+![topology diagram](images/topology_diagram.png)
+
 ## Starting the lab
 
 First verify that the IOS image is in place:
