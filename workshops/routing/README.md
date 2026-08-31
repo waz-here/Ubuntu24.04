@@ -177,6 +177,10 @@ Clone or copy this routing directory to a fresh Ubuntu 24.04 VM, then run:
 ```bash
 cd ~/routing-ubuntu24
 chmod +x setup_routing_workshop_ubuntu24.sh
+```
+
+Run the install script with no options
+```
 sudo ./setup_routing_workshop_ubuntu24.sh
 ```
 
