@@ -10,6 +10,10 @@
 #   - Existing ~/virtual_labs/routing and ~/virtual_labs/images layout retained.
 #   - Apache Guacamole 1.6.0 + guacd in Docker for browser-based router consoles.
 #   - Nginx reverse proxy with a self-signed TLS certificate by default.
+#   - Optional instructor LXC jump host on 192.168.30.222/24.
+#     The Ubuntu host uses 192.168.30.254/24 on an internal bridge.
+#     WAN TCP/2222 is DNATed to the jump host TCP/22, while host SSH
+#     remains on WAN TCP/22.
 #
 # Run:
 #   sudo ./setup_routing_workshop_ubuntu24.sh
@@ -21,6 +25,10 @@
 #   --enable-firewall       Configure a restrictive iptables/ip6tables ruleset.
 #                           SSH remains allowed. HTTP/HTTPS are allowed when
 #                           Guacamole is installed.
+#   --enable-instructor-jumphost
+#                           Create a locked-down LXC jump host at
+#                           192.168.30.222/24. Host bridge: 192.168.30.254/24.
+#                           WAN TCP/2222 forwards to the jump host TCP/22.
 #   --no-upgrade            Skip apt-get dist-upgrade.
 #   --workshop-user USER    Override the non-root workshop owner.
 #
@@ -44,7 +52,7 @@ DYNAGEN_IMAGE="routing-workshop-dynagen:${DYNAGEN_VERSION}"
 
 GUACAMOLE_VERSION="1.6.0"
 
-TOPOLOGY_URL="https://raw.githubusercontent.com/waz-here/Ubuntu18.04/master/workshops/routing/dynamips/topology.net"
+TOPOLOGY_URL="https://raw.githubusercontent.com/waz-here/Ubuntu24.04/main/workshops/routing/dynamips/topology.net"
 
 ########################################
 # Defaults
@@ -52,10 +60,20 @@ TOPOLOGY_URL="https://raw.githubusercontent.com/waz-here/Ubuntu18.04/master/work
 
 INSTALL_GUACAMOLE=1
 ENABLE_FIREWALL=0
+ENABLE_INSTRUCTOR_JUMPHOST=0
 DO_UPGRADE=1
 GUAC_USERNAME="student"
 GUAC_PASSWORD=""
 WORKSHOP_USER_OVERRIDE=""
+
+# Instructor jump host network
+INSTRUCTOR_BRIDGE="br-instructor"
+INSTRUCTOR_NETWORK="192.168.30.0/24"
+INSTRUCTOR_HOST_IP="192.168.30.254"
+INSTRUCTOR_JUMPHOST_IP="192.168.30.222"
+INSTRUCTOR_SSH_WAN_PORT="2222"
+INSTRUCTOR_CONTAINER="routing-instructor"
+INSTRUCTOR_USER="instructor"
 
 ########################################
 # Logging and error handling
@@ -90,7 +108,12 @@ Options:
   --without-guacamole     Do not install Guacamole/Nginx browser console access.
   --guac-user USER        Workshop web username. Default: student
   --guac-password PASS    Workshop web password. Default: generated randomly.
-  --enable-firewall            Enable a restrictive iptables firewall ruleset.
+  --enable-firewall       Enable a restrictive iptables firewall ruleset.
+  --enable-instructor-jumphost
+                          Create a locked-down LXC instructor jump host.
+                          Internal host: 192.168.30.254/24
+                          Jump host:     192.168.30.222/24
+                          WAN TCP/2222 -> jump host TCP/22
   --no-upgrade            Skip apt-get dist-upgrade.
   --workshop-user USER    User who owns ~/virtual_labs.
   -h, --help              Show this help.
@@ -119,6 +142,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --enable-firewall)
             ENABLE_FIREWALL=1
+            shift
+            ;;
+        --enable-instructor-jumphost)
+            ENABLE_INSTRUCTOR_JUMPHOST=1
             shift
             ;;
         --no-upgrade)
@@ -219,6 +246,9 @@ install_base_packages() {
         openssl
         screen
         telnet
+        socat
+        lxc
+        lxc-templates
         iptables
         iptables-persistent
         netfilter-persistent
@@ -802,6 +832,303 @@ EOF
     log "Nginx configured for HTTPS browser access."
 }
 
+
+########################################
+# Instructor LXC jump host
+########################################
+
+configure_instructor_bridge() {
+    [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]] || return
+
+    log "Configuring instructor management bridge ${INSTRUCTOR_BRIDGE} at ${INSTRUCTOR_HOST_IP}/24."
+
+    cat >/usr/local/sbin/routing-workshop-instructor-bridge <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BRIDGE="${INSTRUCTOR_BRIDGE}"
+ADDRESS="${INSTRUCTOR_HOST_IP}/24"
+
+case "\${1:-up}" in
+    up)
+        if ! ip link show "\$BRIDGE" >/dev/null 2>&1; then
+            ip link add name "\$BRIDGE" type bridge
+        fi
+        if ! ip -4 addr show dev "\$BRIDGE" | grep -qF "${INSTRUCTOR_HOST_IP}/24"; then
+            ip addr add "\$ADDRESS" dev "\$BRIDGE"
+        fi
+        ip link set "\$BRIDGE" up
+        ;;
+    down)
+        if ip link show "\$BRIDGE" >/dev/null 2>&1; then
+            ip link set "\$BRIDGE" down || true
+            ip link delete "\$BRIDGE" type bridge || true
+        fi
+        ;;
+    *)
+        echo "Usage: \$0 {up|down}" >&2
+        exit 2
+        ;;
+esac
+EOF
+    chmod 0755 /usr/local/sbin/routing-workshop-instructor-bridge
+
+    cat >/etc/systemd/system/routing-workshop-instructor-bridge.service <<EOF
+[Unit]
+Description=Routing Workshop Instructor Management Bridge
+Before=lxc.service lxc@${INSTRUCTOR_CONTAINER}.service
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/routing-workshop-instructor-bridge up
+ExecStop=/usr/local/sbin/routing-workshop-instructor-bridge down
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now routing-workshop-instructor-bridge.service >>"$LOG_FILE" 2>&1
+}
+
+configure_instructor_nat() {
+    [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]] || return
+
+    WAN_INTERFACE="$(ip -4 route show default | awk '/default/ {print $5; exit}')"
+    [[ -n "$WAN_INTERFACE" ]] || die "Could not determine the WAN interface for instructor jump host NAT."
+
+    log "Instructor jump host WAN interface detected as ${WAN_INTERFACE}."
+
+    # Remove only rules owned by this workshop before re-adding them.
+    while iptables -t nat -C PREROUTING -i "$WAN_INTERFACE" -p tcp --dport "$INSTRUCTOR_SSH_WAN_PORT" \
+        -j DNAT --to-destination "${INSTRUCTOR_JUMPHOST_IP}:22" 2>/dev/null; do
+        iptables -t nat -D PREROUTING -i "$WAN_INTERFACE" -p tcp --dport "$INSTRUCTOR_SSH_WAN_PORT" \
+            -j DNAT --to-destination "${INSTRUCTOR_JUMPHOST_IP}:22"
+    done
+
+    while iptables -t nat -C POSTROUTING -s "$INSTRUCTOR_NETWORK" -o "$WAN_INTERFACE" -j MASQUERADE 2>/dev/null; do
+        iptables -t nat -D POSTROUTING -s "$INSTRUCTOR_NETWORK" -o "$WAN_INTERFACE" -j MASQUERADE
+    done
+
+    iptables -t nat -A PREROUTING -i "$WAN_INTERFACE" -p tcp --dport "$INSTRUCTOR_SSH_WAN_PORT" \
+        -j DNAT --to-destination "${INSTRUCTOR_JUMPHOST_IP}:22"
+    iptables -t nat -A POSTROUTING -s "$INSTRUCTOR_NETWORK" -o "$WAN_INTERFACE" -j MASQUERADE
+
+    # Forward the public instructor SSH connection to the LXC.
+    iptables -I FORWARD 1 -i "$WAN_INTERFACE" -o "$INSTRUCTOR_BRIDGE" \
+        -p tcp -d "$INSTRUCTOR_JUMPHOST_IP" --dport 22 \
+        -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    iptables -I FORWARD 1 -i "$INSTRUCTOR_BRIDGE" -o "$WAN_INTERFACE" \
+        -s "$INSTRUCTOR_JUMPHOST_IP" -p tcp --sport 22 \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Permit only DNS, HTTP and HTTPS from the jump host towards the WAN.
+    # This allows package maintenance without providing general forwarding.
+    iptables -I FORWARD 1 -i "$INSTRUCTOR_BRIDGE" -o "$WAN_INTERFACE" \
+        -s "$INSTRUCTOR_JUMPHOST_IP" -p udp --dport 53 -j ACCEPT
+    iptables -I FORWARD 1 -i "$INSTRUCTOR_BRIDGE" -o "$WAN_INTERFACE" \
+        -s "$INSTRUCTOR_JUMPHOST_IP" -p tcp -m multiport --dports 53,80,443 -j ACCEPT
+    iptables -I FORWARD 1 -i "$WAN_INTERFACE" -o "$INSTRUCTOR_BRIDGE" \
+        -d "$INSTRUCTOR_JUMPHOST_IP" \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    netfilter-persistent save >>"$LOG_FILE" 2>&1 || true
+}
+
+install_aux_proxy_services() {
+    [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]] || return
+
+    log "Installing AUX console proxies on ${INSTRUCTOR_HOST_IP}:3001-3014."
+
+    cat >/etc/systemd/system/routing-workshop-aux-proxy@.service <<EOF
+[Unit]
+Description=Routing Workshop AUX proxy TCP/%i
+After=network.target routing-workshop-instructor-bridge.service
+Requires=routing-workshop-instructor-bridge.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:%i,bind=${INSTRUCTOR_HOST_IP},reuseaddr,fork TCP:127.0.0.1:%i
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+
+    local port
+    for port in $(seq 3001 3014); do
+        systemctl enable --now "routing-workshop-aux-proxy@${port}.service" >>"$LOG_FILE" 2>&1
+    done
+}
+
+configure_instructor_jumphost() {
+    [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]] || return
+
+    log "Creating locked-down instructor LXC jump host ${INSTRUCTOR_CONTAINER}."
+
+    configure_instructor_bridge
+    configure_instructor_nat
+
+    if ! lxc-info -n "$INSTRUCTOR_CONTAINER" >/dev/null 2>&1; then
+        local lxc_arch
+        case "$(dpkg --print-architecture)" in
+            amd64) lxc_arch="amd64" ;;
+            arm64) lxc_arch="arm64" ;;
+            *) die "Instructor LXC currently supports amd64 and arm64 hosts only." ;;
+        esac
+
+        lxc-create -n "$INSTRUCTOR_CONTAINER" -t download -- \
+            -d ubuntu -r noble -a "$lxc_arch" \
+            >>"$LOG_FILE" 2>&1
+    else
+        log "Existing LXC container ${INSTRUCTOR_CONTAINER} found. Reconfiguring it."
+        lxc-stop -n "$INSTRUCTOR_CONTAINER" >>"$LOG_FILE" 2>&1 || true
+    fi
+
+    local config="/var/lib/lxc/${INSTRUCTOR_CONTAINER}/config"
+    [[ -f "$config" ]] || die "LXC configuration not found: $config"
+
+    # Remove any existing network/start settings that this installer owns.
+    sed -i \
+        -e '/^lxc\.net\.0\./d' \
+        -e '/^lxc\.start\.auto/d' \
+        -e '/^lxc\.start\.delay/d' \
+        "$config"
+
+    cat >>"$config" <<EOF
+
+# Routing workshop instructor network
+lxc.net.0.type = veth
+lxc.net.0.link = ${INSTRUCTOR_BRIDGE}
+lxc.net.0.flags = up
+lxc.net.0.ipv4.address = ${INSTRUCTOR_JUMPHOST_IP}/24
+lxc.net.0.ipv4.gateway = ${INSTRUCTOR_HOST_IP}
+lxc.start.auto = 1
+lxc.start.delay = 3
+EOF
+
+    lxc-start -n "$INSTRUCTOR_CONTAINER" -d >>"$LOG_FILE" 2>&1
+
+    local ready=0
+    local _
+    for _ in $(seq 1 40); do
+        if lxc-attach -n "$INSTRUCTOR_CONTAINER" -- /bin/true >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+    [[ "$ready" -eq 1 ]] || die "Instructor LXC did not become ready."
+
+    # Ensure predictable DNS while the private container is being provisioned.
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- bash -c \
+        'rm -f /etc/resolv.conf && printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" >/etc/resolv.conf'
+
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- apt-get update >>"$LOG_FILE" 2>&1
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y openssh-server telnet ca-certificates >>"$LOG_FILE" 2>&1
+
+    # Create the instructor account.
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- bash -c \
+        "id -u ${INSTRUCTOR_USER} >/dev/null 2>&1 || useradd -m -s /bin/bash ${INSTRUCTOR_USER}"
+
+    # Reuse the Azure/VM administrator's existing authorised SSH keys.
+    local host_authorized_keys="${WORKSHOP_HOME}/.ssh/authorized_keys"
+    [[ -s "$host_authorized_keys" ]] || \
+        die "No SSH authorised_keys found at ${host_authorized_keys}. Add an SSH public key before enabling the instructor jump host."
+
+    local rootfs="/var/lib/lxc/${INSTRUCTOR_CONTAINER}/rootfs"
+    install -d -m 0700 -o 0 -g 0 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
+    cp "$host_authorized_keys" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
+    chmod 0600 "${rootfs}/home/${INSTRUCTOR_USER}/.ssh/authorized_keys"
+
+    local uid gid
+    uid="$(chroot "$rootfs" id -u "$INSTRUCTOR_USER")"
+    gid="$(chroot "$rootfs" id -g "$INSTRUCTOR_USER")"
+    chown -R "$uid:$gid" "${rootfs}/home/${INSTRUCTOR_USER}/.ssh"
+
+    # Prefer the repository copy of the instructor menu if available.
+    local script_dir menu_source
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    menu_source="${script_dir}/jumphost/router-console-menu.sh"
+
+    if [[ -f "$menu_source" ]]; then
+        cp "$menu_source" "${rootfs}/usr/local/bin/router-console-menu"
+    else
+        cat >"${rootfs}/usr/local/bin/router-console-menu" <<'EOF'
+#!/usr/bin/env bash
+set -u
+
+HOST="192.168.30.254"
+
+while true; do
+    clear
+    echo "Routing Workshop - Instructor AUX Console"
+    echo
+    for i in $(seq 1 14); do
+        printf " %2d) Router r%02d\n" "$i" "$i"
+    done
+    echo
+    echo "  q) Quit"
+    echo
+    read -r -p "Select router [1-14]: " choice
+
+    case "$choice" in
+        q|Q) exit 0 ;;
+        ''|*[!0-9]*)
+            echo "Invalid selection."
+            sleep 1
+            ;;
+        *)
+            if (( choice >= 1 && choice <= 14 )); then
+                port=$((3000 + choice))
+                printf "\nConnecting to Router r%02d AUX console on %s:%d\n" "$choice" "$HOST" "$port"
+                echo "Telnet escape sequence: Ctrl-] then type quit"
+                echo
+                /usr/bin/telnet "$HOST" "$port"
+                echo
+                read -r -p "Press Enter to return to the router menu..." _
+            else
+                echo "Invalid selection."
+                sleep 1
+            fi
+            ;;
+    esac
+done
+EOF
+    fi
+    chmod 0755 "${rootfs}/usr/local/bin/router-console-menu"
+
+    cat >"${rootfs}/etc/ssh/sshd_config.d/90-routing-workshop-instructor.conf" <<EOF
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+AllowUsers ${INSTRUCTOR_USER}
+
+Match User ${INSTRUCTOR_USER}
+    ForceCommand /usr/local/bin/router-console-menu
+    DisableForwarding yes
+    X11Forwarding no
+    PermitTTY yes
+EOF
+
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- systemctl enable ssh >>"$LOG_FILE" 2>&1
+    lxc-attach -n "$INSTRUCTOR_CONTAINER" -- systemctl restart ssh >>"$LOG_FILE" 2>&1
+
+    install_aux_proxy_services
+
+    netfilter-persistent save >>"$LOG_FILE" 2>&1 || true
+
+    log "Instructor jump host configured at ${INSTRUCTOR_JUMPHOST_IP}; WAN TCP/${INSTRUCTOR_SSH_WAN_PORT} forwards to SSH."
+}
+
 ########################################
 # Firewall
 ########################################
@@ -847,6 +1174,11 @@ configure_iptables() {
         iptables -A INPUT -i docker0 -p tcp --dport 4822 -j ACCEPT
     fi
 
+    if [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]]; then
+        # Instructor AUX proxies are reachable only from the dedicated jump host.
+        iptables -A INPUT -i "$INSTRUCTOR_BRIDGE"             -s "$INSTRUCTOR_JUMPHOST_IP" -d "$INSTRUCTOR_HOST_IP"             -p tcp --dport 3001:3014 -j ACCEPT
+    fi
+
     # Dynamips console ports 2001-2014 and hypervisors 7200/7201 remain bound
     # to 127.0.0.1, so no external INPUT rule is required for them.
     iptables -A INPUT -j DROP
@@ -883,6 +1215,12 @@ validate_installation() {
         )
 
         nginx -t >>"$LOG_FILE" 2>&1
+    fi
+
+    if [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]]; then
+        ip -4 addr show dev "$INSTRUCTOR_BRIDGE" | grep -q "$INSTRUCTOR_HOST_IP" ||             die "Instructor bridge validation failed."
+        lxc-info -n "$INSTRUCTOR_CONTAINER" -sH | grep -q "RUNNING" ||             die "Instructor jump host validation failed."
+        ss -ltn | grep -q "${INSTRUCTOR_HOST_IP}:3001" ||             die "Instructor AUX proxy validation failed."
     fi
 }
 
@@ -954,6 +1292,25 @@ display_summary() {
         echo
     fi
 
+    if [[ "$ENABLE_INSTRUCTOR_JUMPHOST" -eq 1 ]]; then
+        echo "Instructor jump host:"
+        echo "  Internal host bridge: ${INSTRUCTOR_HOST_IP}/24"
+        echo "  LXC jump host:        ${INSTRUCTOR_JUMPHOST_IP}/24"
+        echo "  External SSH port:    ${INSTRUCTOR_SSH_WAN_PORT}"
+        echo
+        echo "Instructor SSH command:"
+        if [[ -n "$primary_ip" ]]; then
+            echo "  ssh -p ${INSTRUCTOR_SSH_WAN_PORT} ${INSTRUCTOR_USER}@${primary_ip}"
+        else
+            echo "  ssh -p ${INSTRUCTOR_SSH_WAN_PORT} ${INSTRUCTOR_USER}@<server-ip>"
+        fi
+        echo
+        echo "The jump host reuses ${WORKSHOP_USER}'s SSH authorised keys."
+        echo "Host administration remains on normal SSH TCP/22."
+        echo "In Azure, allow TCP/${INSTRUCTOR_SSH_WAN_PORT} in the VM's NSG for instructor source addresses."
+        echo
+    fi
+
     if [[ "$ENABLE_FIREWALL" -eq 0 ]]; then
         echo "SECURITY NOTE:"
         echo "  The optional iptables firewall was NOT enabled."
@@ -997,6 +1354,7 @@ main() {
     create_lab_helpers
     install_guacamole
     configure_nginx
+    configure_instructor_jumphost
     configure_iptables
     validate_installation
 
