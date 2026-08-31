@@ -58,7 +58,7 @@ https://www.cisco.com/c/en/us/support/routers/7200-series-routers/tsd-products-s
 ## Repository layout
 
 ```text
-routing-ubuntu24/
+routing/
 ├── README.md
 ├── setup_routing_workshop_ubuntu24.sh
 ├── dynamips/
@@ -133,6 +133,9 @@ Other useful options:
 
 If the installer adds your account to the `docker` group, log out and back in
 before using Docker without `sudo`.
+
+## Topology diagram
+![topology diagram](images/topology_diagram.png)
 
 ## Starting the lab
 
