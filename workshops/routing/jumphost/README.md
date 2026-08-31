@@ -37,3 +37,39 @@ Network Security Group separately to permit:
 * TCP `2222` from instructor source addresses.
 
 Do not expose TCP `3001-3014` in the Azure NSG.
+
+
+## Password-first instructor access
+
+The default instructor workflow uses a workshop password rather than the Azure VM
+administrator's SSH credentials.
+
+Run:
+
+```bash
+sudo ./setup_routing_workshop_ubuntu24.sh \
+    --enable-instructor-jumphost \
+    --enable-firewall \
+    --instructor-password
+```
+
+The installer prompts for the password twice and requires at least 12 characters.
+The password is not supplied as a command-line value, so it is not stored in shell
+history.
+
+If no `--instructor-authorized-keys` file is supplied, password authentication is
+also selected automatically.
+
+An instructor public key can be added later:
+
+```bash
+sudo ./jumphost/add_instructor_ssh_key.sh instructor.pub
+```
+
+To add the key and move the jump host to public-key-only authentication:
+
+```bash
+sudo ./jumphost/add_instructor_ssh_key.sh --disable-password instructor.pub
+```
+
+The Azure VM administrator's SSH keys are never copied into the instructor jump host.
