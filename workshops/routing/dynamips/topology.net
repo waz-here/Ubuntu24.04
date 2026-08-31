@@ -23,6 +23,7 @@ model = 7200
         fa0/1 = r13 fa0/1
         s1/0 = r3 s1/1
         model = 7200
+        cnfg = configs/R1.cfg
 
     [[router r2]]
         console = 2002
@@ -30,18 +31,21 @@ model = 7200
         fa0/1 = r14 fa0/1
         s1/0 = r4 s1/1
         model = 7200
+        cnfg = configs/R2.cfg
 
     [[router r3]]
         console = 2003
         aux = 3003
         s1/0 = r5 s1/1
         model = 7200
+        cnfg = configs/R3.cfg
 
     [[router r4]]
         console = 2004
         aux = 3004
         s1/0 = r6 s1/1
         model = 7200
+        cnfg = configs/R4.cfg
 
     [[router r5]]
         console = 2005
@@ -49,18 +53,21 @@ model = 7200
         fa0/0 = r6 fa0/0
         s1/0 = r7 s1/1
         model = 7200
+        cnfg = configs/R5.cfg
 
     [[router r6]]
         console = 2006
         aux = 3006
         s1/0 = r8 s1/1
         model = 7200
+        cnfg = configs/R6.cfg
 
     [[router r7]]
         console = 2007
         aux = 3007
         s1/0 = r9 s1/1
         model = 7200
+        cnfg = configs/R7.cfg
 
 [localhost:7201]
 
@@ -84,6 +91,7 @@ model = 7200
         aux = 3008
         s1/0 = r10 s1/1
         model = 7200
+        cnfg = configs/R8.cfg
 
     [[router r9]]
         console = 2009
@@ -91,32 +99,38 @@ model = 7200
         fa0/0 = r10 fa0/0
         s1/0 = r11 s1/1
         model = 7200
+        cnfg = configs/R9.cfg
 
     [[router r10]]
         console = 2010
         aux = 3010
         s1/0 = r12 s1/1
         model = 7200
+        cnfg = configs/R10.cfg
 
     [[router r11]]
         console = 2011
         aux = 3011
         s1/0 = r13 s1/1
         model = 7200
+        cnfg = configs/R11.cfg
 
     [[router r12]]
         console = 2012
         aux = 3012
         s1/0 = r14 s1/1
         model = 7200
+        cnfg = configs/R12.cfg
 
     [[router r13]]
         console = 2013
         aux = 3013
         fa0/0 = r14 fa0/0
         model = 7200
+        cnfg = configs/R13.cfg
 
     [[router r14]]
         console = 2014
         aux = 3014
         model = 7200
+        cnfg = configs/R14.cfg
